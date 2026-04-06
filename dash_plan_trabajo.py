@@ -113,31 +113,105 @@ def parse_excel(raw):
     except Exception: return None
 
 def build_bytes(df, orig):
+    """
+    Actualiza SOLO los valores de las celdas de datos en el Excel original.
+    NO toca: formato, colores, bordes, celdas de título, hojas de instrucciones.
+    El truco: actualizar celda por celda solo donde hay datos, nunca borrar filas.
+    """
     if orig:
         try:
             wb = load_workbook(io.BytesIO(orig))
-            target = next((s for s in wb.sheetnames if any(k in s.lower() for k in ["tarea","cierre","task"])),wb.sheetnames[0])
+            target = next(
+                (s for s in wb.sheetnames if any(k in s.lower() for k in ["tarea","cierre","task"])),
+                wb.sheetnames[0]
+            )
             ws = wb[target]
+
+            # 1. Localizar la fila de encabezado (contiene ID y TAREA)
             hrow = None
-            for ri in range(1,min(10,ws.max_row+1)):
-                vals=[str(ws.cell(ri,c).value or "").upper().strip() for c in range(1,ws.max_column+1)]
-                if "ID" in vals and "TAREA" in vals: hrow=ri; break
-            if hrow:
-                hdrs=[str(ws.cell(hrow,c).value or "").strip().replace("\n"," ") for c in range(1,ws.max_column+1)]
-                rev={"OBSERVACIÓN / BLOQUEO":"OBSERVACIÓN","% AVANCE":"AVANCE","FECHA LÍMITE":"FECHA LÍMITE"}
-                col_idx={}
-                for ci,h in enumerate(hdrs,1):
-                    canon=rev.get(h.upper().strip(),h.upper().strip())
-                    for c in COLS:
-                        if c.upper()==canon: col_idx[c]=ci; break
-                for rr in range(hrow+1,ws.max_row+10):
-                    for cc in range(1,ws.max_column+1): ws.cell(rr,cc).value=None
-                for ri2,(_,row) in enumerate(df.iterrows(),hrow+1):
-                    for cn,ci2 in col_idx.items():
-                        val=row.get(cn,""); ws.cell(ri2,ci2).value=str(val) if str(val).strip() else None
-                buf=io.BytesIO(); wb.save(buf); return buf.getvalue()
-        except Exception: pass
-    buf2=io.BytesIO(); df.to_excel(buf2,index=False,sheet_name="Tareas",engine="openpyxl"); return buf2.getvalue()
+            for ri in range(1, min(10, ws.max_row + 1)):
+                vals = [str(ws.cell(ri, c).value or "").upper().strip()
+                        for c in range(1, ws.max_column + 1)]
+                if "ID" in vals and "TAREA" in vals:
+                    hrow = ri
+                    break
+            if hrow is None:
+                raise ValueError("No se encontró la fila de encabezado")
+
+            # 2. Mapear nombre de columna → índice de columna en Excel
+            hdrs = [str(ws.cell(hrow, c).value or "").strip().replace("\n", " ")
+                    for c in range(1, ws.max_column + 1)]
+            rev = {
+                "OBSERVACIÓN / BLOQUEO": "OBSERVACIÓN",
+                "% AVANCE": "AVANCE",
+                "FECHA LÍMITE": "FECHA LÍMITE",
+            }
+            col_idx = {}  # nombre_col_app → número_columna_excel (1-based)
+            for ci, h in enumerate(hdrs, 1):
+                canon = rev.get(h.upper().strip(), h.upper().strip())
+                for c in COLS:
+                    if c.upper() == canon:
+                        col_idx[c] = ci
+                        break
+
+            # 3. Construir índice de filas existentes en el Excel: ID → número de fila
+            id_col = col_idx.get("ID")
+            existing_rows = {}  # "T-001" → fila_excel
+            if id_col:
+                for ri in range(hrow + 1, ws.max_row + 1):
+                    cell_val = str(ws.cell(ri, id_col).value or "").strip()
+                    if cell_val.startswith("T-"):
+                        existing_rows[cell_val] = ri
+
+            # 4. Actualizar filas existentes — SOLO el valor, sin tocar formato
+            last_data_row = hrow
+            for _, row in df.iterrows():
+                task_id = str(row.get("ID", "")).strip()
+                if task_id in existing_rows:
+                    er = existing_rows[task_id]
+                    for col_name, ci2 in col_idx.items():
+                        val = str(row.get(col_name, "")).strip()
+                        ws.cell(er, ci2).value = val if val else None
+                    last_data_row = max(last_data_row, er)
+                else:
+                    # Tarea nueva: agregar al final, copiando estilo de la última fila de datos
+                    new_row = last_data_row + 1
+                    # Copiar estilo de la fila anterior (misma estructura)
+                    from copy import copy
+                    from openpyxl.styles import PatternFill
+                    for cc in range(1, ws.max_column + 1):
+                        src_cell = ws.cell(last_data_row, cc)
+                        dst_cell = ws.cell(new_row, cc)
+                        if src_cell.has_style:
+                            dst_cell.font      = copy(src_cell.font)
+                            dst_cell.fill      = copy(src_cell.fill)
+                            dst_cell.border    = copy(src_cell.border)
+                            dst_cell.alignment = copy(src_cell.alignment)
+                    # Escribir valores de la nueva tarea
+                    for col_name, ci2 in col_idx.items():
+                        val = str(row.get(col_name, "")).strip()
+                        ws.cell(new_row, ci2).value = val if val else None
+                    existing_rows[task_id] = new_row
+                    last_data_row = new_row
+
+            # 5. Limpiar filas que ya no existen en el df (tareas eliminadas)
+            ids_en_df = set(df["ID"].astype(str).str.strip().tolist())
+            for task_id, er in existing_rows.items():
+                if task_id not in ids_en_df:
+                    for cc in range(1, ws.max_column + 1):
+                        ws.cell(er, cc).value = None
+
+            buf = io.BytesIO()
+            wb.save(buf)
+            return buf.getvalue()
+
+        except Exception as e:
+            st.warning(f"Usando Excel simple (error al preservar formato): {e}")
+
+    # Fallback: Excel simple sin formato
+    buf2 = io.BytesIO()
+    df.to_excel(buf2, index=False, sheet_name="Tareas", engine="openpyxl")
+    return buf2.getvalue()
 
 # ── SESIÓN ───────────────────────────────────────────────────────────────────
 for k,v in [("df",None),("raw",None),("token",None),("hist",[]),("loaded",False),("src","")]:
@@ -435,7 +509,7 @@ tenant_id     = "7df7bf9b-7611-4597-b13a-07ed6df6fac2"
 client_id     = "2835aaaa-9a71-41df-bc88-d8d82d695bd3"
 client_secret = "vOq8Q~UvGoC8vMZWIngA6LD1~LADMr8cKtuLbcu7"
 file_path     = "/DISPOWER_Tareas_Streamlit.xlsx"
-refresh_token = "1.AXEBm7_3fRF2l0WxOgftbfb6wqqqNShxmt9BvIjY2C1pW9PoATFxAQ.BQABAwEAAAADAOz_BQD0_0V2b1N0c0FydGlmYWN0cwIAAAAAABejma7k3xkFxbQXk74kvz9p5sXUb6vcp2xVXgPGMA3UN2NLtDP7ZcDHAGtsUwJd22Gi0NlyrRewnmvDmVizdxXWODUamsB0EOCAl9xMKVB3kiJaZ5X_vbsC87dX6o4esBkGpJgrj487KxV35YG0joo1LAsMXxrRGgyldzqd2g_Ct8t1_K1kV2lFKKdogL8IY14v7w3teTrxjJ0bw5RDqev-hVv4mU5lhlkJkO-BgWKaCE4UxuvuTUUVMZ8Vx3Rw2BBBGqrC-qVRtOO3LdV54SjfoFU2tGRN9-naY_Mk2R9ovNDTw_YbTmhgCEKWFm5cJcwb_3eiEXsBX_FUKd1fot1Plvhzl-o4b1yKf7ZqwPsRZ7I85WY7T8a6iwJxQjRSEE-sKBZ1IhVl1zxeWZ0RYuJ7bHn-4_ke2Ri6DKEThqq4c1-PTXBQM1zwM4nimueYikNNVQqDzn2WzyK8MSFrWzgkBl-zN5rHE47HuMeA3JlLufn6oGgW_V0YA4up9Iqcu76dsi6081iHPMXePeghdFEo6eJhGpXGMkznc_8iQaC_1Uv9PMa6W2YjIWUa8vA_C6u69ifSHtTdltNv0jMdmV3a_CttDuxmUxDXRFtFDXfRlemylXBO7ywq91WM6MQRo2J4UtoSIeaP_37163ocb3VssuvAgQa8wP_OjEnWR5Xv3ukMuGE9a4TvR2bIfdQFvt1bRCW146pO_mZYiWX9iqMBBxvq6FXZ-fvG0vvnxPp2to8RKFItUNXskD63gy2NLckX4veVwBL6nAiSasFReCvEbrqhbjcwEtj1VhJ6w-bC6qzLaACIvVzX5JaQE0_Y9uLTNuWGfdETpQM1lt9a0XPeitSBQoqidghfal__1iEAMwcTdMZ31NjPPexQItOMiaW5oXs-tnwTvgc8j9F9egz9ovI7vbLJaM3sXne2wIuoFz0XTjQyQgpDIe_MRkPTEheCHKA-bcZKvpS2igCVMEt0XeUGBzSL6M6iGASIgfcQzm3h2DGohC3E1bTE6S8lH8ItwONVF3Z13JmijMU508PijFFMyjjTv8l1N7b9vQIx8bWdKVHFaKXqlFM7oN-CuIYyoM0JV6EcWqEFOBM3wMfxT1RwSzQk2bnpMqMaWGw89PvccXw3NbQt4gharYLFE3eIZkoM1RoahP_iHD0azmLyNlb-0jJBOUM0CiwaebWIqPvV8WHolWZJJXv6v02KMEla2i8RIvZyz-0o9UzkHyYA4nla2iSwp1tjAhncRuKqH59irjMvxDMtu0KwkvwA1KjKHX4j-a-UTlfonnOSegvgcT3drLIJjMQxHugHB60VFPBfD08NSXUJ9xHVeWDj_7z-tp5uNA"
+refresh_token = "1.AXEBm7_3..."   ← el mismo del otro app
 """,language="toml")
     st.markdown("**`file_path`**: ruta del Excel en OneDrive desde la raíz. Ejemplos:")
     st.code('file_path = "/DISPOWER_Tareas_Streamlit.xlsx"          # en la raíz\nfile_path = "/Documentos/DISPOWER_Tareas_Streamlit.xlsx"\nfile_path = "/1. Escalamiento/DISPOWER_Tareas_Streamlit.xlsx"',language="toml")
