@@ -11,7 +11,7 @@ tenant_id     = "tu-tenant-id"          # ID del directorio Azure AD
 client_id     = "tu-client-id"          # ID de la aplicación registrada
 client_secret = "tu-client-secret"      # Secreto de la app
 sharepoint_url = "https://suncompanycol-my.sharepoint.com"
-share_link    = "https://suncompanycol-my.sharepoint.com/personal/javier_agudelo_dispower_co/_layouts/15/guestaccess.aspx?share=IQAR5H9drEd6RJJ06JnXkTVAAUi79Eg4HXu6KxcLFNlLfPk&e=jGJRo3"
+share_link    = "https://suncompanycol-my.sharepoint.com/personal/javier_agudelo_dispower_co/_layouts/15/download.aspx?share=IQAR5H9drEd6RJJ06JnXkTVAAUi79Eg4HXu6KxcLFNlLfPk&e=jGJRo3"
 
 VER README_GRAPH.md para instrucciones detalladas de configuración.
 """
