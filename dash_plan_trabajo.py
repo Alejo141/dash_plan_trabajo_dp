@@ -11,7 +11,7 @@ tenant_id     = "tu-tenant-id"          # ID del directorio Azure AD
 client_id     = "tu-client-id"          # ID de la aplicación registrada
 client_secret = "tu-client-secret"      # Secreto de la app
 sharepoint_url = "https://suncompanycol-my.sharepoint.com"
-share_link    = "https://suncompanycol-my.sharepoint.com/personal/javier_agudelo_dispower_co/_layouts/15/download.aspx?share=IQAR5H9drEd6RJJ06JnXkTVAAUi79Eg4HXu6KxcLFNlLfPk&e=jGJRo3"
+share_link    = "https://suncompanycol-my.sharepoint.com/personal/javier_agudelo_dispower_co/_layouts/15/guestaccess.aspx?share=IQAR5H9drEd6RJJ06JnXkTVAAUi79Eg4HXu6KxcLFNlLfPk&e=jGJRo3"
 
 VER README_GRAPH.md para instrucciones detalladas de configuración.
 """
@@ -129,27 +129,76 @@ def graph_patch(path: str, token: str, body: dict) -> bool:
 
 def get_drive_item_id(token: str) -> tuple[str | None, str | None]:
     """
-    Obtiene el driveId y itemId del archivo Excel desde el enlace compartido.
-    Usa el endpoint /shares para resolver el enlace.
+    Obtiene el driveId y itemId del archivo Excel.
+    Intenta múltiples estrategias en orden.
     """
+    import base64
+    cfg = st.secrets.get("graph", {})
+
+    # ── Estrategia 1: item_id y drive_id explícitos en secrets (más confiable) ──
+    explicit_item  = cfg.get("item_id", "")
+    explicit_drive = cfg.get("drive_id", "")
+    if explicit_item and explicit_drive:
+        return explicit_drive, explicit_item
+
+    # ── Estrategia 2: /me/drive — buscar por nombre de archivo ──
     try:
-        share_url = st.secrets.get("graph", {}).get("share_link", "")
-        if not share_url:
-            return None, None
-
-        # Codificar la URL compartida en base64url sin padding
-        import base64
-        encoded = base64.urlsafe_b64encode(share_url.encode()).decode().rstrip("=")
-        share_token = f"u!{encoded}"
-
-        result = graph_get(f"shares/{share_token}/driveItem", token)
-        if result:
-            item_id  = result.get("id")
-            drive_id = result.get("parentReference", {}).get("driveId")
-            return drive_id, item_id
-        return None, None
+        filename = cfg.get("filename", "DISPOWER_Tareas_Streamlit.xlsx")
+        me_result = graph_get(f"me/drive/root/search(q='{filename}')", token)
+        if me_result and me_result.get("value"):
+            item = me_result["value"][0]
+            drive_id = item.get("parentReference", {}).get("driveId")
+            item_id  = item.get("id")
+            if drive_id and item_id:
+                return drive_id, item_id
     except Exception:
-        return None, None
+        pass
+
+    # ── Estrategia 3: /shares con el share_link ──
+    share_url = cfg.get("share_link", "")
+    if share_url:
+        try:
+            encoded = base64.urlsafe_b64encode(share_url.encode()).decode().rstrip("=")
+            share_token = f"u!{encoded}"
+            result = graph_get(f"shares/{share_token}/driveItem", token)
+            if result and result.get("id"):
+                item_id  = result.get("id")
+                drive_id = result.get("parentReference", {}).get("driveId")
+                if drive_id and item_id:
+                    return drive_id, item_id
+        except Exception:
+            pass
+
+        # ── Estrategia 4: /shares con solo el token del enlace (parámetro share=...) ──
+        try:
+            import re
+            match = re.search(r"share=([^&]+)", share_url)
+            if match:
+                share_token2 = f"u!{match.group(1)}"
+                result2 = graph_get(f"shares/{share_token2}/driveItem", token)
+                if result2 and result2.get("id"):
+                    item_id2  = result2.get("id")
+                    drive_id2 = result2.get("parentReference", {}).get("driveId")
+                    if drive_id2 and item_id2:
+                        return drive_id2, item_id2
+        except Exception:
+            pass
+
+    # ── Estrategia 5: Listar archivos recientes del usuario ──
+    try:
+        recent = graph_get("me/drive/recent", token)
+        if recent and recent.get("value"):
+            filename_cfg = cfg.get("filename", "DISPOWER")
+            for item in recent["value"]:
+                if filename_cfg.lower() in item.get("name","").lower():
+                    drive_id = item.get("parentReference", {}).get("driveId")
+                    item_id  = item.get("id")
+                    if drive_id and item_id:
+                        return drive_id, item_id
+    except Exception:
+        pass
+
+    return None, None
 
 @st.cache_data(ttl=25, show_spinner=False)
 def load_excel_from_graph(token: str) -> pd.DataFrame | None:
@@ -755,79 +804,126 @@ elif pagina == "📜 Historial":
 # CONFIGURACIÓN
 # ════════════════════════════════════════════════════════════════════════════
 elif pagina == "⚙️ Configuración":
-    st.markdown("## ⚙️ Configuración — Conexión Microsoft Graph")
+    st.markdown("## Configuración y diagnóstico")
 
-    st.markdown('<div class="info-box">Para que el tablero lea y escriba directamente en el Excel de SharePoint necesitas registrar una aplicación en Azure Active Directory. El proceso toma ~10 minutos.</div>', unsafe_allow_html=True)
+    cfg_now = {}
+    try:
+        cfg_now = st.secrets.get("graph", {})
+    except Exception:
+        pass
+    token_ok = get_graph_token() is not None
 
-    with st.expander("📋 Paso a paso — Registrar app en Azure AD", expanded=True):
-        st.markdown("""
-**1. Ir al portal de Azure**
-- Abre [portal.azure.com](https://portal.azure.com) con tu cuenta corporativa de DISPOWER / Sunco
-- Busca **"Azure Active Directory"** o **"Microsoft Entra ID"**
+    if token_ok:
+        st.markdown('<div class="ok">Token Microsoft Graph OK. Azure AD bien configurado.</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="warn">No se pudo obtener el token. Verifica tenant_id, client_id y client_secret.</div>', unsafe_allow_html=True)
 
-**2. Registrar una nueva aplicación**
-- En el menú lateral: **Registros de aplicaciones → Nueva aplicación**
-- Nombre: `DISPOWER Tablero ZNI`
-- Tipos de cuenta compatibles: **Solo cuentas en este directorio organizativo**
-- URI de redireccionamiento: dejar vacío
-- Clic en **Registrar**
+    st.markdown("### Paso 1 — Encontrar el archivo en tu OneDrive")
+    st.markdown(
+        '<div class="info">El token funciona pero el app necesita el drive_id y el item_id exactos de tu archivo. ' +
+        "Haz clic para buscar automaticamente todos los Excel en tu OneDrive.</div>",
+        unsafe_allow_html=True
+    )
 
-**3. Copiar los IDs**
-- Copia el **ID de aplicación (cliente)** → `client_id`
-- Copia el **ID de directorio (inquilino)** → `tenant_id`
+    if st.button("Buscar archivo Excel en mi OneDrive", type="primary", disabled=not token_ok):
+        t2 = get_graph_token()
+        found_items = []
 
-**4. Crear el secreto de cliente**
-- En el menú de la app: **Certificados y secretos → Nuevo secreto de cliente**
-- Descripción: `Tablero ZNI`, Expiración: 24 meses
-- Clic en **Agregar**
-- **Copia el VALOR inmediatamente** (solo se muestra una vez) → `client_secret`
+        with st.spinner("Buscando archivos Excel..."):
+            try:
+                res1 = graph_get("me/drive/root/search(q='.xlsx')", t2)
+                if res1 and res1.get("value"):
+                    for item in res1["value"]:
+                        name = item.get("name", "")
+                        if ".xlsx" in name.lower() or ".xls" in name.lower():
+                            found_items.append({
+                                "Nombre": name,
+                                "drive_id": item.get("parentReference", {}).get("driveId", ""),
+                                "item_id": item.get("id", ""),
+                                "Ruta": item.get("parentReference", {}).get("path", ""),
+                                "Modificado": (item.get("lastModifiedDateTime") or "")[:10],
+                            })
+            except Exception as ex1:
+                st.warning(f"Busqueda fallida: {ex1}")
 
-**5. Agregar permisos de API**
-- En el menú: **Permisos de API → Agregar permiso → Microsoft Graph → Permisos de aplicación**
-- Busca y agrega: `Files.ReadWrite.All` (para leer y escribir el Excel)
-- Busca y agrega: `Sites.ReadWrite.All` (para acceder a SharePoint)
-- Clic en **Conceder consentimiento de administrador** (importante)
+            try:
+                res2 = graph_get("me/drive/recent", t2)
+                if res2 and res2.get("value"):
+                    existing = {i["item_id"] for i in found_items}
+                    for item in res2["value"]:
+                        name = item.get("name", "")
+                        iid  = item.get("id", "")
+                        if (".xlsx" in name.lower() or ".xls" in name.lower()) and iid not in existing:
+                            found_items.append({
+                                "Nombre": name,
+                                "drive_id": item.get("parentReference", {}).get("driveId", ""),
+                                "item_id": iid,
+                                "Ruta": item.get("parentReference", {}).get("path", ""),
+                                "Modificado": (item.get("lastModifiedDateTime") or "")[:10],
+                            })
+            except Exception:
+                pass
 
-**6. Crear el archivo secrets.toml**
-- En la misma carpeta donde está `streamlit_app.py`, crea la carpeta `.streamlit`
-- Dentro, crea el archivo `secrets.toml` con este contenido:
-""")
-        st.code(f"""[graph]
-tenant_id     = "PEGA-AQUI-EL-ID-DEL-DIRECTORIO"
-client_id     = "PEGA-AQUI-EL-ID-DE-APLICACION"
-client_secret = "PEGA-AQUI-EL-VALOR-DEL-SECRETO"
-share_link    = "https://suncompanycol-my.sharepoint.com/personal/javier_agudelo_dispower_co/_layouts/15/guestaccess.aspx?share=IQAR5H9drEd6RJJ06JnXkTVAAUi79Eg4HXu6KxcLFNlLfPk&e=jGJRo3"
-""", language="toml")
+        if found_items:
+            st.success(f"Se encontraron {len(found_items)} archivos Excel en tu OneDrive:")
+            st.dataframe(pd.DataFrame(found_items), use_container_width=True, hide_index=True)
 
-    with st.expander("☁️ Si usas Streamlit Cloud (despliegue en la nube)"):
-        st.markdown("""
-1. En [share.streamlit.io](https://share.streamlit.io), abre tu app
-2. Ve a **Settings → Secrets**
-3. Pega el contenido del `secrets.toml` de arriba
-4. Guarda y reinicia la app
-""")
+            best = next((i for i in found_items if "dispower" in i["Nombre"].lower()), found_items[0])
+            st.markdown(f"**Archivo sugerido:** {best['Nombre']}")
+            st.markdown("### Paso 2 — Copia este secrets.toml actualizado:")
 
-    with st.expander("🔍 Probar conexión"):
-        if st.button("Probar Graph API"):
-            t2 = get_graph_token()
-            if t2:
-                st.success("Token obtenido correctamente.")
-                drive_id, item_id = get_drive_item_id(t2)
-                if item_id:
-                    st.success(f"Archivo encontrado en SharePoint. Drive: {drive_id[:20]}... Item: {item_id[:20]}...")
-                else:
-                    st.warning("Token OK pero no se pudo resolver el archivo. Verifica el share_link y los permisos.")
+            tid = cfg_now.get("tenant_id", "TU-TENANT-ID")
+            cid = cfg_now.get("client_id", "TU-CLIENT-ID")
+            sec = cfg_now.get("client_secret", "TU-SECRET")
+            did = best["drive_id"]
+            iid = best["item_id"]
+            fnm = best["Nombre"]
+
+            toml_txt = f"""[graph]
+tenant_id     = "{tid}"
+client_id     = "{cid}"
+client_secret = "{sec}"
+drive_id      = "{did}"
+item_id       = "{iid}"
+filename      = "{fnm}"
+"""
+            st.code(toml_txt, language="toml")
+            st.markdown(
+                '<div class="ok">Copia este bloque en .streamlit/secrets.toml, ' +
+                "reemplaza el contenido anterior y reinicia el app con: streamlit run streamlit_app.py</div>",
+                unsafe_allow_html=True
+            )
+        else:
+            me_info = graph_get("me", t2)
+            if me_info:
+                user_str = f"{me_info.get('displayName','?')} ({me_info.get('userPrincipalName','?')})"
             else:
-                st.error("No se pudo obtener el token. Verifica tenant_id, client_id y client_secret.")
+                user_str = "desconocido"
+            st.error(f"No se encontraron archivos Excel para: {user_str}")
+            st.markdown(
+                '<div class="warn">Verifica que: el archivo este en el OneDrive correcto, ' +
+                "el permiso Files.ReadWrite.All este concedido, y se haya pulsado Conceder consentimiento de administrador.</div>",
+                unsafe_allow_html=True
+            )
 
     st.markdown("---")
-    st.markdown("### Estado actual")
-    if graph_ok:
-        st.markdown('<div class="ok">✅ Graph API configurada y conectada.</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="warn">⚠️ Graph API no configurada. Sigue los pasos anteriores.</div>', unsafe_allow_html=True)
+    st.markdown("### Estructura del secrets.toml (despues de ejecutar el diagnostico)")
+    st.code("""[graph]
+tenant_id     = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+client_id     = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+client_secret = "tu-secreto-aqui"
+drive_id      = "b!xxxxxxxxxxxx"
+item_id       = "xxxxxxxxxxxx"
+filename      = "DISPOWER_Tareas_Streamlit.xlsx"
+""", language="toml")
 
-    if st.button("🗑️ Resetear sesión"):
+    st.markdown("**Permisos requeridos en Azure AD:**")
+    st.markdown("- `Files.ReadWrite.All` Leer y escribir el Excel **CRITICO**")
+    st.markdown("- `User.Read` Identificar el usuario para el diagnostico **Recomendado**")
+
+    st.markdown("---")
+    if st.button("Resetear sesion y caches"):
         st.session_state.clear()
         load_excel_from_graph.clear()
+        get_cached_token.clear()
         st.rerun()
