@@ -518,7 +518,7 @@ elif pagina == "📋 Lista de Tareas":
         except: av_v=0
         area_c=AREA_COLOR.get(row["ÁREA"],"#888")
 
-        with st.expander(f"**{row['ID']}** — {row['TAREA'][:85]}{'…' if len(row['TAREA'])>85 else ''}"):
+        with st.expander(f"**{row['ID']}** — {row['TAREA'][:85]}{'…' if len(row['TAREA'])>85 else ''}", key=f"exp_{idx}"):
             h1c,h2c,h3c,h4c=st.columns(4)
             h1c.markdown(estado_badge(row["ESTADO"]),unsafe_allow_html=True)
             h2c.markdown(prio_badge(row["PRIORIDAD"]),unsafe_allow_html=True)
@@ -535,24 +535,26 @@ elif pagina == "📋 Lista de Tareas":
                 st.markdown(f'<div class="warn">{row["OBSERVACIÓN"]}</div>',unsafe_allow_html=True)
 
             st.markdown("---")
+            # Usar idx (índice del DataFrame) para garantizar claves únicas
+            wk = f"{idx}"
             e1,e2,e3=st.columns(3)
             with e1:
                 new_est=st.selectbox("Estado",ESTADOS,
                     index=ESTADOS.index(row["ESTADO"]) if row["ESTADO"] in ESTADOS else 0,
-                    key=f"est_{row['ID']}")
+                    key=f"est_{wk}")
             with e2:
-                new_av=st.slider("Avance %",0,100,av_v,key=f"av_{row['ID']}")
+                new_av=st.slider("Avance %",0,100,av_v,key=f"av_{wk}")
             with e3:
-                new_resp=st.text_input("Responsable",value=row["RESPONSABLE"],key=f"rsp_{row['ID']}")
+                new_resp=st.text_input("Responsable",value=row["RESPONSABLE"],key=f"rsp_{wk}")
 
-            new_obs=st.text_area("Observación",value=row.get("OBSERVACIÓN",""),height=65,key=f"obs_{row['ID']}")
+            new_obs=st.text_area("Observación",value=row.get("OBSERVACIÓN",""),height=65,key=f"obs_{wk}")
             try:    fl_val=datetime.strptime(row.get("FECHA LÍMITE",""),"%d/%m/%Y").date() if row.get("FECHA LÍMITE","").strip() else None
             except: fl_val=None
-            new_fl=st.date_input("Fecha límite",value=fl_val,key=f"fl_{row['ID']}")
+            new_fl=st.date_input("Fecha límite",value=fl_val,key=f"fl_{wk}")
 
             b1,b2,b3,b4=st.columns(4)
             with b1:
-                if st.button("💾 Guardar",key=f"s_{row['ID']}"):
+                if st.button("💾 Guardar",key=f"s_{wk}"):
                     df_new=st.session_state["df"].copy()
                     m=df_new["ID"]==row["ID"]
                     df_new.loc[m,"ESTADO"]=new_est
@@ -564,7 +566,7 @@ elif pagina == "📋 Lista de Tareas":
                     st.rerun()
             with b2:
                 if row["ESTADO"]!="Cerrada":
-                    if st.button("✅ Cerrar",key=f"c_{row['ID']}"):
+                    if st.button("✅ Cerrar",key=f"c_{wk}"):
                         df_new=st.session_state["df"].copy()
                         m=df_new["ID"]==row["ID"]
                         df_new.loc[m,"ESTADO"]="Cerrada"
@@ -573,7 +575,7 @@ elif pagina == "📋 Lista de Tareas":
                         commit(df_new,f"{row['ID']} CERRADA: {row['TAREA'][:40]}")
                         st.rerun()
                 else:
-                    if st.button("🔄 Reabrir",key=f"r_{row['ID']}"):
+                    if st.button("🔄 Reabrir",key=f"r_{wk}"):
                         df_new=st.session_state["df"].copy()
                         m=df_new["ID"]==row["ID"]
                         df_new.loc[m,"ESTADO"]="En curso"
@@ -581,13 +583,13 @@ elif pagina == "📋 Lista de Tareas":
                         commit(df_new,f"{row['ID']} reabierta")
                         st.rerun()
             with b3:
-                if st.button("🟠 Bloquear",key=f"bl_{row['ID']}"):
+                if st.button("🟠 Bloquear",key=f"bl_{wk}"):
                     df_new=st.session_state["df"].copy()
                     df_new.loc[df_new["ID"]==row["ID"],"ESTADO"]="Bloqueada"
                     commit(df_new,f"{row['ID']} BLOQUEADA")
                     st.rerun()
             with b4:
-                if st.button("🗑️ Eliminar",key=f"d_{row['ID']}"):
+                if st.button("🗑️ Eliminar",key=f"d_{wk}"):
                     df_new=st.session_state["df"].copy()
                     df_new=df_new[df_new["ID"]!=row["ID"]].reset_index(drop=True)
                     commit(df_new,f"{row['ID']} ELIMINADA")
